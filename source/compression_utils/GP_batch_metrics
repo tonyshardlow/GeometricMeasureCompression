@@ -1,0 +1,227 @@
+from NC_mets import get_parts#
+import torch
+
+def Curr_embedding(shape_pars,vec,pad_len):
+
+   gen_pts,M1 = shape_pars
+   #return centres,normals
+   if vec:
+      A = gen_pts[M1].view((chunk_ratio,L,F,d,d))
+
+      v1,v2,v3 = A[:,:,:,0,:],A[:,:,:,1,:],A[:,:,:,2,:]
+
+      g1 = v2-v1
+      g2 = v3-v1
+
+      v_normals = .5*torch.cross(g1,g2)
+
+      v_centres = (v1 + v2 + v3)/3.0
+
+      return v_centres,v_normals
+         
+     
+   else:
+      shapes = []
+      for shape in shape_pars:
+         
+         zz = gen_pts
+         v1,v2,v3= zz[M1[:,0]],zz[M1[:,1]],zz[M1[:,2]]
+
+
+         g1 = v2-v1
+         g2 = v3-v1
+
+         v_normals = .5*torch.cross(g1,g2).type(torch.float64)
+         v_centres = (v1 + v2 + v3)/3.0
+
+         alph = v_normals.type(torch.float64)
+         GEN = v_centres.type(torch.float64)
+         n= GEN.shape[0]
+         zers = torch.zeros((pad_len,GEN.shape[1]))
+         zers1 = torch.zeros((pad_len,alph.shape[1] ))
+         GEN = torch.vstack((GEN,zers))
+         alph = torch.vstack((alph,zers1))
+
+         shapes.append( torch.hstack(GEN,alph))
+      
+      return torch.vstack(shapes)
+
+def Var_embedding(shape_pars,vec,pad_len):
+
+   gen_pts,M1 = shape_pars
+   #return (centres,unit normals),areas
+   if vec:
+      A = gen_pts[M1].view((chunk_ratio,L,F,d,d))
+
+      v1,v2,v3 = A[:,:,:,0,:],A[:,:,:,1,:],A[:,:,:,2,:]
+
+      g1 = v2-v1
+      g2 = v3-v1
+
+      v_normals = .5*torch.cross(g1,g2)
+
+      v_areas = torch.norm(v_normals,dim=3)
+
+      v_areas_1 = torch.where(v_areas != 0.0,v_areas,np.inf)
+
+      v_norm_sc = v_normals/v_areas_1.unsqueeze(-1)
+      v_centres = (v1 + v2 + v3)/3.0
+
+      return v_centres,v_norm_sc,v_areas
+         
+   
+   else:
+      
+      for shape in shape_pars:
+         
+         zz = gen_pts
+         v1,v2,v3= zz[M1[:,0]],zz[M1[:,1]],zz[M1[:,2]]
+
+
+         g1 = v2-v1
+         g2 = v3-v1
+
+         v_normals = .5*torch.cross(g1,g2).type(torch.float32)
+         v_centres = (v1 + v2 + v3).type(torch.float32)/3.0
+         v_areas = torch.norm(v_normals,dim=1)
+         v_areas_1 = torch.where(v_areas != 0.0,v_areas,np.inf)
+
+
+         v_norm_sc = v_normals/v_areas_1.unsqueeze(1)
+
+         GEN = torch.hstack((v_centres.type(torch.float32),v_norm_sc))
+         n= GEN.shape[0]
+
+      return GEN,v_areas
+
+
+def get_parts(gen_pts,M1,bdry,*args):
+
+  #make the quantities below vectorised wrt input batch
+  stack,edges_for_verts_inds,u_edge_inds,max_,lens,coords,bdry_verts,bdry_vert_edges = args
+  
+  
+  if bdry:
+    e_for_verts = (gen_pts[bdry_vert_edges[:,:,1] ] - gen_pts[bdry_vert_edges[:,:,0] ] )#.unsqueeze(1)
+
+    f_norm = torch.linalg.norm(e_for_verts,dim=2) + .000001
+
+    sev_vec = e_for_verts/f_norm.unsqueeze(-1) 
+    sev  = sev_vec.sum(1)
+    sum_edges = sev
+
+  zz = gen_pts
+  v1,v2,v3= zz[M1[:,0]].contiguous(),zz[M1[:,1]].contiguous(),zz[M1[:,2]].contiguous()
+  g1 = v2-v1
+  g2 = v3-v1
+  g3 = v3-v2
+  v_norms = .5*torch.cross(g1,g2)
+
+  v_normals = v_norms/torch.linalg.norm(v_norms,dim=1).reshape((-1,1)) 
+
+  coord1 = coords[0].cuda()
+  coord2 = coords[1].cuda()
+  #print(coord1)
+
+  v_re = coord1*v_normals[stack[:,0]] + coord2*v_normals[stack[:,1]]
+
+  ints = torch.ones(len(lens)).cuda()
+  ints[lens] = 0.5
+  #print(ints.mean())
+  v_res = ints.reshape((-1,1))*v_re
+  #if sum(lens)>0:
+   # v_res[lens] = v_res[lens]/2.0
+  fs = (gen_pts[u_edge_inds][:,1,:].contiguous() -  gen_pts[u_edge_inds][:,0,:].contiguous())
+  cs =  (gen_pts[u_edge_inds][:,1,:].contiguous() +  gen_pts[u_edge_inds][:,0,:].contiguous())/2
+  normals = v_res
+  
+  #print(sev.shape,sev_vec.shape)
+  if bdry:
+    return fs.contiguous(),gen_pts[bdry_verts].contiguous(),cs.contiguous(),normals.contiguous(),sum_edges.contiguous()#[bdry_verts]
+  else:
+    return fs.contiguous(),None,cs.contiguous(),normals.contiguous(),None
+
+
+def comm(a,b,i,j):
+  return (a[:,i-1]*b[:,j-1]) - (a[:,j-1]*b[:,i-1])
+
+
+indexes = [[1,2],[1,3],[1,4],[1,5],[1,6],[2,3],[2,4],[2,5],[2,6],[3,4],[3,5],[3,6],[4,5],[4,6],[5,6]]
+
+indexes_1 = [0,0,0,0,0,1,1,1,1,2,2,2,3,3,4]
+indexes_2 = [1,2,3,4,5,2,3,4,5,3,4,5,4,5,5]
+
+
+def coordinates_1(a,b):
+  v = torch.zeros((a.shape[0],15)).cuda()
+  for i in range(15):
+    v[:,i] = comm(a,b,*indexes[i])
+
+  return v
+
+def coordinates(a,b):
+
+  return (a[:,indexes_1]*b[:,indexes_2] - a[:,indexes_2]*b[:,indexes_1]).reshape((-1,15)).cuda()
+
+
+
+def Embed(S1):
+  #fs,pts,cs,normals,sum_edges = S1
+
+  a1=torch.zeros((S1[0].shape[0],6))
+  norms_ = torch.linalg.norm(S1[0],dim=1).reshape((-1,1))
+  normalized= S1[0]/norms_
+  a1[:,:3] = normalized
+  a2 =torch.zeros((S1[0].shape[0],6))
+  sum_norm=S1[-2]
+  a2[:,3:] = sum_norm
+  #fill is the boundary weights
+  if S1[1] is not None:
+    
+    fill=torch.zeros((S1[1].shape[0],15)).cuda()
+    fill[:,12:] = S1[-1]
+    return torch.vstack(fill,norms_*coordinates(a1,a2))
+  
+  else:
+    return norms_*coordinates(a1,a2)
+
+
+
+##nneds vectorization of get_parts and Embed
+def  NC_embedding(shape_pars,vec,pad_len):
+
+   gen_pts,M1,parts,bdry,components = shape_pars
+   #return shape pars is parts for NC   
+   if vec:
+      None
+   
+   else:
+      
+      for shape in shape_pars:
+         
+         parts = get_parts(gen_pts,M1,bdry,*components)
+
+         embedding = Embed(parts)
+
+         fs,pts,cs,normals,sum_edges = parts 
+         
+         if bdry:
+            return  torch.vstack([pts,cs]).contiguous(),embedding.contiguous()
+         
+         else:
+            return  cs,embedding.contiguous()
+
+
+
+
+def Batched_metric(embeddings1,embeddings2,kern_pars):
+   
+   emb_pts,emb_weights = embeddings1
+   emb_pts_1,emb_weights_1 = embeddings2
+
+   ##embedding points kern mat
+
+   ##multiply embedding kern mat w weights
+
+   #res
+   return None
